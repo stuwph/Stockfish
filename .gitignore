@@ -1,0 +1,16 @@
+# Never ignore .gitignore itself
+!.gitignore
+
+# ignore compilation results
+src/stockfish
+src/*.exe
+src/*.o
+src/.depend
+src/*~
+src/core
+src/bench.txt
+src/*.gcda
+src/syzygy/*.o
+src/syzygy/*.gcda
+src/.vscode/
+\ No newline at end of file
