@@ -24,7 +24,9 @@
 #include <cstring>   // For std::memset
 #include <iostream>
 #include <sstream>
-
+#include <random>  //opening variety sugar
+#include <fstream> //kelly
+#include "polybook.h"//from BrainFish
 #include "evaluate.h"
 #include "misc.h"
 #include "movegen.h"
@@ -36,7 +38,20 @@
 #include "tt.h"
 #include "uci.h"
 #include "syzygy/tbprobe.h"
+//livebook begin
+#define CURL_STATICLIB
+extern "C" {
+#include <curl/curl.h>
+}
+#undef min
+#undef max
+//livebook end
 
+//kelly begin
+bool useLearning = true;
+bool enabledLearningProbe;
+
+//kelly end
 namespace Search {
 
   LimitsType Limits;
@@ -146,6 +161,8 @@ namespace {
     bool otherThread, owning;
   };
 
+  int openingVariety;//from Sugar
+
   template <NodeType NT>
   Value search(Position& pos, Stack* ss, Value alpha, Value beta, Depth depth, bool cutNode);
 
@@ -190,20 +207,55 @@ namespace {
 
 
 /// Search::init() is called at startup to initialize various lookup tables
+//livebook begin
+CURL *g_cURL;
+std::string g_szRecv;
+std::string g_livebookURL = "http://www.chessdb.cn/cdb.php";
+bool g_inBook;
+
+size_t cURL_WriteFunc(void *contents, size_t size, size_t nmemb, std::string *s)
+{
+	size_t newLength = size * nmemb;
+	try
+	{
+		s->append((char*)contents, newLength);
+	}
+	catch (std::bad_alloc &e)
+	{
+		//handle memory problem
+		return 0;
+	}
+	return newLength;
+}
+void Search::setLiveBookURL(const std::string &newURL) {
+	g_livebookURL = newURL;
+}
+void Search::setLiveBookTimeout(size_t newTimeoutMS) {
+	curl_easy_setopt(g_cURL, CURLOPT_TIMEOUT_MS, newTimeoutMS);
+}
 
 void Search::init() {
 
   for (int i = 1; i < MAX_MOVES; ++i)
       Reductions[i] = int((24.8 + std::log(Threads.size()) / 2) * std::log(i));
+
+  //livebook begin
+  curl_global_init(CURL_GLOBAL_DEFAULT);
+  g_cURL = curl_easy_init();
+  curl_easy_setopt(g_cURL, CURLOPT_TIMEOUT_MS, 1000L);
+  curl_easy_setopt(g_cURL, CURLOPT_WRITEFUNCTION, cURL_WriteFunc);
+  curl_easy_setopt(g_cURL, CURLOPT_WRITEDATA, &g_szRecv);
+  g_inBook = true;
+  //livebook end
 }
-
-
+//livebook end
 /// Search::clear() resets search state to its initial value
 
 void Search::clear() {
 
   Threads.main()->wait_for_search_finished();
 
+  g_inBook = true;//livebook
   Time.availableNodes = 0;
   TT.clear();
   Threads.clear();
@@ -226,7 +278,17 @@ void MainThread::search() {
   Color us = rootPos.side_to_move();
   Time.init(Limits, us, rootPos.game_ply());
   TT.new_search();
+  //Kelly begin
+  enabledLearningProbe = false;
+  int piecesCnt = rootPos.count<KNIGHT>(WHITE) + rootPos.count<BISHOP>(WHITE) + rootPos.count<ROOK>(WHITE) + rootPos.count<QUEEN>(WHITE) + rootPos.count<KING>(WHITE)
+	  + rootPos.count<KNIGHT>(BLACK) + rootPos.count<BISHOP>(BLACK) + rootPos.count<ROOK>(BLACK) + rootPos.count<QUEEN>(BLACK) + rootPos.count<KING>(BLACK);
 
+  if (piecesCnt <= PIECE_TYPE_NB)
+  {
+    useLearning = true;
+  }
+  //Kelly end
+  openingVariety = Options["Opening variety"];//from Sugar
   if (rootMoves.empty())
   {
       rootMoves.emplace_back(MOVE_NONE);
@@ -234,8 +296,50 @@ void MainThread::search() {
                 << UCI::value(rootPos.checkers() ? -VALUE_MATE : VALUE_DRAW)
                 << sync_endl;
   }
+  //Books management begin
   else
   {
+      Move bookMove = MOVE_NONE;
+      if(!Limits.infinite && !Limits.mate)
+      {
+	//Live Book begin
+	if (Options["Live Book"] && g_inBook)
+	{
+	    CURLcode res;
+	    char *szFen = curl_easy_escape(g_cURL, rootPos.fen().c_str(), 0);
+	    std::string szURL = g_livebookURL + "?action=" + (Options["Live Book Diversity"] ? "query" : "querybest") + "&board=" + szFen;
+	    curl_free(szFen);
+	    curl_easy_setopt(g_cURL, CURLOPT_URL, szURL.c_str());
+	    g_szRecv.clear();
+	    res = curl_easy_perform(g_cURL);
+	    if (res == CURLE_OK)
+	    {
+	      g_szRecv.erase(std::find(g_szRecv.begin(), g_szRecv.end(), '\0'), g_szRecv.end());
+	      if (g_szRecv.find("move:") != std::string::npos)
+	      {
+		std::string tmp = g_szRecv.substr(5);
+		bookMove = UCI::to_move(rootPos, tmp);
+	      }
+	    }
+        }
+	else
+	{
+	  bookMove = polybook.probe(rootPos);
+	  if (!bookMove)
+	  {
+	      bookMove = polybook2.probe(rootPos);
+	  }
+	}
+	//Live Book end
+      }
+      if (bookMove && std::count(rootMoves.begin(), rootMoves.end(), bookMove))
+      {
+	for (Thread* th : Threads)
+	    std::swap(th->rootMoves[0], *std::find(th->rootMoves.begin(), th->rootMoves.end(), bookMove));
+      }
+      else
+      {
+	  g_inBook = false;
       for (Thread* th : Threads)
       {
           th->bestMoveChanges = 0;
@@ -245,6 +349,10 @@ void MainThread::search() {
 
       Thread::search(); // Let's start searching!
   }
+  }
+  //Books management end
+
+
 
   // When we reach the maximum depth, we can arrive here without a raise of
   // Threads.stop. However, if we are pondering or in an infinite search,
@@ -304,6 +412,24 @@ void MainThread::search() {
 
   previousScore = bestThread->rootMoves[0].score;
 
+  
+  //kelly begin	
+  if (bestThread->completedDepth > 4)
+  {
+    LearningFileEntry currentLearningEntry;
+    currentLearningEntry.depth = bestThread->completedDepth;
+    currentLearningEntry.hashKey = rootPos.key();
+    currentLearningEntry.move = bestThread->rootMoves[0].pv[0];
+    currentLearningEntry.score = bestThread->rootMoves[0].score;
+    insertIntoOrUpdateLearningTable(currentLearningEntry,globalLearningHT);
+  }
+
+  if (!enabledLearningProbe)
+  {
+      useLearning = false;
+  }
+  //Kelly end
+  
   // Send again PV info if we have a new best thread
   if (bestThread != this)
       sync_cout << UCI::pv(bestThread->rootPos, bestThread->completedDepth, -VALUE_INFINITE, VALUE_INFINITE) << sync_endl;
@@ -314,6 +440,16 @@ void MainThread::search() {
       std::cout << " ponder " << UCI::move(bestThread->rootMoves[0].pv[1], rootPos.is_chess960());
 
   std::cout << sync_endl;
+  //livebook begin
+  if (Options["Live Book"] && Options["Live Book Contribute"] && !g_inBook)
+  {
+    char *szFen = curl_easy_escape(g_cURL, rootPos.fen().c_str(), 0);
+    std::string szURL = g_livebookURL + "?action=store" + "&board=" + szFen + "&move=move:" + UCI::move(bestThread->rootMoves[0].pv[0], rootPos.is_chess960());
+    curl_free(szFen);
+    curl_easy_setopt(g_cURL, CURLOPT_URL, szURL.c_str());
+    curl_easy_perform(g_cURL);
+  }
+  //livebook end
 }
 
 
@@ -611,13 +747,16 @@ namespace {
     StateInfo st;
     TTEntry* tte;
     Key posKey;
-    Move ttMove, move, excludedMove, bestMove;
+    Move ttMove, move, excludedMove=MOVE_NONE, bestMove,expTTMove=MOVE_NONE;//from Kelly
     Depth extension, newDepth;
-    Value bestValue, value, ttValue, eval, maxValue;
-    bool ttHit, ttPv, inCheck, givesCheck, improving, didLMR, priorCapture;
+    //from Kelly begin
+    Value bestValue, value, ttValue, eval=VALUE_NONE, maxValue, expTTValue=VALUE_NONE;
+    bool ttHit, ttPv, inCheck, givesCheck, improving, didLMR, priorCapture, expTTHit=false;
+    //from Kelly End
     bool captureOrPromotion, doFullDepthSearch, moveCountPruning, ttCapture, singularLMR;
     Piece movedPiece;
     int moveCount, captureCount, quietCount;
+    bool updatedLearning = false;//from Kelly
 
     // Step 1. Initialize node
     Thread* thisThread = pos.this_thread();
@@ -718,7 +857,72 @@ namespace {
         }
         return ttValue;
     }
+    //from Kelly begin
+    expTTHit = false;
+    updatedLearning = false;
 
+    if (!excludedMove && useLearning)
+    {
+      Node node = getNodeFromHT(posKey,HashTableType::global);
+      if (node!=nullptr)
+      {
+	  MoveInfo moveInfo = node->latestMoveInfo;
+	  if (node->hashKey == posKey)
+	  {
+	    bool haveTTMove = false;
+	    if (ttMove)
+	      haveTTMove = true;
+	    enabledLearningProbe = true;
+	    expTTHit = true;
+		
+	    if(depth - ss->ply < 16)
+	    {
+		expTTMove = node->latestMoveInfo.move;
+//		thisThread->tbHits.fetch_add(1, std::memory_order_relaxed);
+	    }
+		
+	    if (!haveTTMove)
+	    {
+		ttMove = node->latestMoveInfo.move;
+	    }
+	    if (((node->latestMoveInfo.depth >= depth)||(node->latestMoveInfo.performance>=50)))
+	    {
+	      expTTMove = node->latestMoveInfo.move;
+	      expTTValue = node->latestMoveInfo.score;
+	      updatedLearning = true;
+	    }
+	    if ((node->latestMoveInfo.depth == 0))
+		    updatedLearning = false;
+
+
+	    if (!PvNode && updatedLearning && ((moveInfo.depth >= depth)||(moveInfo.performance>=50)))
+	    {
+	      if (expTTValue >= beta)
+	      {
+		if (!pos.capture_or_promotion(moveInfo.move))
+		  update_quiet_stats(pos, ss, moveInfo.move, stat_bonus(depth));
+
+		// Extra penalty for a quiet TT move in previous ply when it gets refuted
+		if ((ss - 1)->moveCount == 1 && !pos.captured_piece())
+		  update_continuation_histories(ss - 1, pos.piece_on(prevSq), prevSq, -stat_bonus(depth + 1));
+	      }
+	      // Penalty for a quiet ttMove that fails low
+	      else
+	      {
+		    if (!pos.capture_or_promotion(expTTMove))
+		    {
+			    int penalty = -stat_bonus(depth);
+			    thisThread->mainHistory[us][from_to(expTTMove)] << penalty;
+			    update_continuation_histories(ss, pos.moved_piece(expTTMove), to_sq(expTTMove), penalty);
+		    }
+	      }
+	      //thisThread->tbHits.fetch_add(1, std::memory_order_relaxed);
+	      return expTTValue;
+	    }
+	  }
+      }
+    }
+    //from Kelly end
     // Step 5. Tablebases probe
     if (!rootNode && TB::Cardinality)
     {
@@ -794,17 +998,32 @@ namespace {
     }
     else
     {
+      //from kelly begin
+      if (!(expTTHit)|| !(updatedLearning))
+      {
         if ((ss-1)->currentMove != MOVE_NULL)
         {
             int bonus = -(ss-1)->statScore / 512;
 
             ss->staticEval = eval = evaluate(pos) + bonus;
         }
-        else
+	else{
             ss->staticEval = eval = -(ss-1)->staticEval + 2 * Eval::Tempo;
-
+	}
         tte->save(posKey, VALUE_NONE, ttPv, BOUND_NONE, DEPTH_NONE, MOVE_NONE, eval);
     }
+      else
+      {
+	// Never assume anything on values stored in TT
+	ss->staticEval = eval = expTTValue;
+	if (eval == VALUE_NONE)
+	  ss->staticEval = eval = evaluate(pos);
+	if(expTTValue != VALUE_NONE)
+	  eval = expTTValue;
+      }
+      //from Kelly end
+    }
+
 
     // Step 7. Razoring (~2 Elo)
     if (   !rootNode // The required rootNode PV handling is not available in qsearch
@@ -941,6 +1160,7 @@ moves_loop: // When in check, search starts from here
 
     value = bestValue;
     singularLMR = moveCountPruning = false;
+    bool isSingularExtension = false;//from Kelly
     ttCapture = ttMove && pos.capture_or_promotion(ttMove);
 
     // Mark this node as being searched
@@ -991,6 +1211,12 @@ moves_loop: // When in check, search starts from here
           if (   !captureOrPromotion
               && !givesCheck)
           {
+              
+			  //from Kelly begin
+              if (isSingularExtension && moveCount > 1)
+        	  {
+            	continue;
+			  }
               // Reduced depth of the next LMR search
               int lmrDepth = std::max(newDepth - reduction(improving, depth, moveCount), 0);
 
@@ -1041,6 +1267,12 @@ moves_loop: // When in check, search starts from here
           {
               extension = 1;
               singularLMR = true;
+	      //from Kelly begin
+	       if (expTTHit && move == expTTMove)
+	       {
+		   isSingularExtension = true;
+	       }
+	      //from Kelly end
           }
 
           // Multi-cut pruning
@@ -1522,7 +1754,10 @@ moves_loop: // When in check, search starts from here
           }
        }
     }
-
+    //from Sugar
+    if (openingVariety && (bestValue + (openingVariety * PawnValueEg / 100) >= 0 ) && (pos.count<PAWN>() > 12))
+	  bestValue += rand() % (openingVariety + 1);
+    //end from Sugar
     // All legal moves have been searched. A special case: If we're in check
     // and no legal moves were found, it is checkmate.
     if (inCheck && bestValue == -VALUE_INFINITE)
@@ -1854,3 +2089,9 @@ void Tablebases::rank_root_moves(Position& pos, Search::RootMoves& rootMoves) {
             m.tbRank = 0;
     }
 }
+//from Kelly begin
+void setStartPoint()
+{
+	useLearning = true;
+}
+//from Kelly end

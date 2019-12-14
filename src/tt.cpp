@@ -21,13 +21,17 @@
 #include <cstring>   // For std::memset
 #include <iostream>
 #include <thread>
-
+#include <fstream> //from kellykynyama mcts
 #include "bitboard.h"
 #include "misc.h"
 #include "thread.h"
 #include "tt.h"
 #include "uci.h"
 
+//from Kelly Begin
+using namespace std;
+LearningHashTable globalLearningHT,experienceHT;
+//from Kelly end
 TranspositionTable TT; // Our global transposition table
 
 /// TTEntry::save populates the TTEntry with a new node's data, possibly
@@ -156,3 +160,257 @@ int TranspositionTable::hashfull() const {
 
   return cnt * 1000 / (ClusterSize * (1000 / ClusterSize));
 }
+//from Kelly begin
+void loadLearningFileIntoLearningTables(bool toDeleteBinFile) {
+  std::string fileName="experience";
+  ifstream inputLearningFile("experience.bin", ios::in | ios::binary);
+  int loading = 1;
+  while (loading)
+  {
+    LearningFileEntry currentInputLearningFileEntry;
+    currentInputLearningFileEntry.depth = 0;
+    currentInputLearningFileEntry.hashKey = 0;
+    currentInputLearningFileEntry.move = MOVE_NONE;
+    currentInputLearningFileEntry.score = VALUE_NONE;
+    currentInputLearningFileEntry.performance = 0;
+    inputLearningFile.read((char*)&currentInputLearningFileEntry, sizeof(currentInputLearningFileEntry));
+    if (currentInputLearningFileEntry.hashKey)
+    {
+      insertIntoOrUpdateLearningTable(currentInputLearningFileEntry,globalLearningHT);
+      if(toDeleteBinFile)
+      {
+	 insertIntoOrUpdateLearningTable(currentInputLearningFileEntry,experienceHT);
+      }
+    }
+    else
+      loading = 0;
+  }
+  inputLearningFile.close();
+  if(toDeleteBinFile)
+  {
+    char fileNameStr[fileName.size() + 1];
+    strcpy(fileNameStr, fileName.c_str());
+    remove(fileNameStr);
+  }
+}
+
+void insertIntoOrUpdateLearningTable(LearningFileEntry& fileExpEntry,LearningHashTable& learningHT)
+{
+    // We search in the range of all the hash table entries with key fileExpEntry
+    auto range = learningHT.equal_range(fileExpEntry.hashKey);
+    auto it1 = range.first;
+    auto it2 = range.second;
+
+    bool isNewNode = true;
+    while (it1 != it2)
+    {
+      Node node = &(it1->second);
+      if (node->hashKey == fileExpEntry.hashKey)
+      {
+	isNewNode = false;
+	for(int k = 0; k <= node->siblings; k++)
+	{
+	  if(k == node->siblings)
+	  {
+	    //update lateChild begin
+	    node->siblingMoveInfo[k].move = fileExpEntry.move;
+	    node->siblingMoveInfo[k].score = fileExpEntry.score;
+	    node->siblingMoveInfo[k].depth = fileExpEntry.depth;
+	    node->siblingMoveInfo[k].performance = fileExpEntry.performance;
+	    //update lateChild end
+	    node->siblings++;
+	    //update lateChild end
+	    if( ((node->siblingMoveInfo[k].performance<50) &&
+		(((node->latestMoveInfo.move == node->siblingMoveInfo[k].move) && (node->latestMoveInfo.depth <= node->siblingMoveInfo[k].depth))
+		||
+		((node->latestMoveInfo.move != node->siblingMoveInfo[k].move) &&
+		((node->latestMoveInfo.depth < node->siblingMoveInfo[k].depth)
+		 ||
+		 ((node->latestMoveInfo.depth == node->siblingMoveInfo[k].depth) &&
+		 ((node->latestMoveInfo.score <= node->siblingMoveInfo[k].score )||(node->latestMoveInfo.performance <= node->siblingMoveInfo[k].performance)))))
+		 ))||
+		 (node->siblingMoveInfo[k].performance>=50)
+	    )
+	    {// Return the HashTable's node updated
+	      //update lateChild begin
+	      node->latestMoveInfo.move = node->siblingMoveInfo[k].move;
+	      node->latestMoveInfo.score = node->siblingMoveInfo[k].score;
+	      node->latestMoveInfo.depth = node->siblingMoveInfo[k].depth;
+	      node->latestMoveInfo.performance = node->siblingMoveInfo[k].performance;
+	      //update lateChild end
+
+	    }
+	    //exit the sibling
+	    break;
+	  }
+	  else
+	  {
+	    if(node->siblingMoveInfo[k].move == fileExpEntry.move)
+	    {
+		if(
+		    ((fileExpEntry.performance<50) &&
+		    (((node->siblingMoveInfo[k].depth < fileExpEntry.depth))
+		    ||
+		    ((node->siblingMoveInfo[k].depth == fileExpEntry.depth) &&
+		     ((node->siblingMoveInfo[k].score <= fileExpEntry.score )||(node->siblingMoveInfo[k].performance <= fileExpEntry.performance)))))
+		    ||
+		    (fileExpEntry.performance>=50)
+		  )
+		  { // Return the HashTable's node updated
+		    //update lateChild begin
+		    node->siblingMoveInfo[k].move = fileExpEntry.move;
+		    node->siblingMoveInfo[k].score = fileExpEntry.score;
+		    node->siblingMoveInfo[k].depth = fileExpEntry.depth;
+		    //update lateChild end
+		    if(
+			(((node->siblingMoveInfo[k].performance<50))&&(((node->latestMoveInfo.move == node->siblingMoveInfo[k].move) && (node->latestMoveInfo.depth <= node->siblingMoveInfo[k].depth))
+			||
+			(
+			 (node->latestMoveInfo.move != node->siblingMoveInfo[k].move) &&
+			 (
+			  (node->latestMoveInfo.depth < node->siblingMoveInfo[k].depth)
+			  ||
+			  (
+			   (node->latestMoveInfo.depth == node->siblingMoveInfo[k].depth) &&
+			   ((node->latestMoveInfo.score <= node->siblingMoveInfo[k].score )||(node->latestMoveInfo.performance <= node->siblingMoveInfo[k].performance ))
+			  )
+			 )
+			)))
+			||
+			(node->siblingMoveInfo[k].performance>=50)
+		      )
+		      {// Return the HashTable's node updated
+			//update lateChild begin
+			node->latestMoveInfo.move = node->siblingMoveInfo[k].move;
+			node->latestMoveInfo.score = node->siblingMoveInfo[k].score;
+			node->latestMoveInfo.depth = node->siblingMoveInfo[k].depth;
+			node->latestMoveInfo.performance = node->siblingMoveInfo[k].performance;
+			//update lateChild end
+		      }
+		    }
+		    //exit the sibling
+		    break;
+	    }
+	  }
+	}
+	//exit the position
+	  break;
+      }
+      it1++;
+    }
+
+    if (isNewNode)
+    {
+      // Node was not found, so we have to create a new one
+      NodeInfo infos;
+      infos.hashKey = fileExpEntry.hashKey;
+      infos.latestMoveInfo.move = fileExpEntry.move;
+      infos.latestMoveInfo.score = fileExpEntry.score;
+      infos.latestMoveInfo.depth = fileExpEntry.depth;
+      infos.latestMoveInfo.performance = fileExpEntry.performance;
+      infos.siblingMoveInfo[0] = infos.latestMoveInfo;
+      infos.siblings = 1;
+      learningHT.insert(make_pair(fileExpEntry.hashKey, infos));
+    }
+}
+
+/// getNodeFromGlobalHT(Key key) probes the Monte-Carlo hash table to return the node with the given
+/// position or a nullptr Node if it doesn't exist yet in the table.
+Node getNodeFromHT(Key key,HashTableType hashTableType)
+{
+  // We search in the range of all the hash table entries with key key.
+  Node currentNode = nullptr;
+  auto range=globalLearningHT.equal_range(key);
+  if(hashTableType==HashTableType::experience)
+    {
+      range=experienceHT.equal_range(key);
+    }
+  auto it1 = range.first;
+  auto it2 = range.second;
+  while (it1 != it2)
+  {
+    currentNode = &(it1->second);
+    if (currentNode->hashKey == key)
+    {
+	return currentNode;
+    }
+    it1++;
+  }
+
+  return currentNode;
+}
+
+void writeLearningFile(HashTableType hashTableType)
+{
+  LearningHashTable currentLearningHT;
+  currentLearningHT=experienceHT;
+  if(hashTableType==HashTableType::global)
+    {
+      currentLearningHT=globalLearningHT;
+    }
+  if(!currentLearningHT.empty())
+    {
+      std::ofstream outputFile ("experience.bin", std::ofstream::trunc | std::ofstream::binary);
+      for(auto& it:currentLearningHT)
+      {
+        LearningFileEntry currentFileExpEntry;
+        NodeInfo currentNodeInfo=it.second;
+        for(int k = 0; k < currentNodeInfo.siblings; k++)
+	{
+		MoveInfo currentLatestMoveInfo=currentNodeInfo.siblingMoveInfo[k];
+		currentFileExpEntry.depth = currentLatestMoveInfo.depth;
+		currentFileExpEntry.hashKey = it.first;
+		currentFileExpEntry.move = currentLatestMoveInfo.move;
+		currentFileExpEntry.score = currentLatestMoveInfo.score;
+		currentFileExpEntry.performance = currentLatestMoveInfo.performance;
+		outputFile.write((char*)&currentFileExpEntry, sizeof(currentFileExpEntry));
+	}
+      }
+      outputFile.close();
+    }
+}
+
+void loadSlaveLearningFilesIntoLearningTables()
+{
+    bool merging=true;
+    int i=0;
+    while (merging)
+    {
+      std::string index = std::to_string(i);
+      std::string slaveFileName ="";
+      slaveFileName="experience" + index + ".bin";
+      ifstream slaveInputFile (slaveFileName, ios::in | ios::binary);
+      if(!slaveInputFile.good())
+      {
+	merging=false;
+	i++;
+      }
+      else
+      {
+	while(slaveInputFile.good())
+	{
+	  LearningFileEntry slaveFileExpEntry;
+	  slaveFileExpEntry.depth = 0;
+	  slaveFileExpEntry.hashKey = 0;
+	  slaveFileExpEntry.move = MOVE_NONE;
+	  slaveFileExpEntry.score = VALUE_NONE;
+	  slaveFileExpEntry.performance = 0;
+
+	  slaveInputFile.read((char*)&slaveFileExpEntry, sizeof(slaveFileExpEntry));
+	  if (slaveFileExpEntry.hashKey)
+	  {
+	      insertIntoOrUpdateLearningTable(slaveFileExpEntry,experienceHT);
+	  }
+	  else
+	  {
+	    slaveInputFile.close();
+	    char slaveStr[slaveFileName.size() + 1];
+	    strcpy(slaveStr, slaveFileName.c_str());
+	    remove(slaveStr);
+	    i++;
+	  }
+	}
+      }
+    }
+}
+//from Kelly End

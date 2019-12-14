@@ -28,6 +28,7 @@
 #include "uci.h"
 #include "endgame.h"
 #include "syzygy/tbprobe.h"
+#include "polybook.h"
 
 namespace PSQT {
   void init();
@@ -38,12 +39,22 @@ int main(int argc, char* argv[]) {
   std::cout << engine_info() << std::endl;
 
   UCI::init(Options);
+  //from Kelly begin
+  loadLearningFileIntoLearningTables(true);
+  loadSlaveLearningFilesIntoLearningTables();
+  writeLearningFile(HashTableType::experience);
+  experienceHT.clear();
+  globalLearningHT.clear();
+  loadLearningFileIntoLearningTables(false);
+  //from Kelly end
   PSQT::init();
   Bitboards::init();
   Position::init();
   Bitbases::init();
   Endgames::init();
   Threads.set(Options["Threads"]);
+  polybook.init(Options["BookFile"]);
+  polybook2.init(Options["BookFile2"]);
   Search::clear(); // After threads are up
 
   UCI::loop(argc, argv);
