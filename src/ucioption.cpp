@@ -91,11 +91,11 @@ void init(OptionsMap& o) {
   o["SyzygyProbeLimit"]      << Option(7, 0, 7);
   o["Live Book"]             << Option(false);
   o["Live Book URL"]         << Option("http://www.chessdb.cn/cdb.php", on_livebook_url);
-  o["Live Book Timeout"]     << Option(1500, 0, 10000, on_livebook_timeout);
+  o["Live Book Timeout"]     << Option(5000, 0, 10000, on_livebook_timeout);
   o["Live Book Diversity"]   << Option(false);
   o["Live Book Contribute"]  << Option(false);
-  o["BookFile"]              << Option("<empty>", on_book_file);
-  o["BookFile2"]             << Option("<empty>", on_book_file2);
+  o["BookFile"]              << Option("F:/Cerebellum/Cerebellum_Light_Poly.bin", on_book_file);
+  o["BookFile2"]             << Option("F:/Hi14/Hiarcs14zfBook.ctg", on_book_file2);
   o["BestBookMove"]          << Option(true, on_best_book_move);
   o["BookDepth"]             << Option(255, 1, 255, on_book_depth);
   o["Opening variety"]       << Option (0, 0, 40);
